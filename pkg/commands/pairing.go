@@ -1,7 +1,7 @@
 package commands
 
 import (
-	"osmo-live/pkg/protocol"
+	"github.com/KevinCowleys/osmo-live/pkg/protocol"
 )
 
 // ConstructPairingPacket sends the initial handshake

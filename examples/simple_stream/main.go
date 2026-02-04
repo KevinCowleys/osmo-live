@@ -7,8 +7,8 @@ import (
 	"os"
 	"strings"
 
-	"osmo-live/pkg/ble"
-	"osmo-live/pkg/osmo"
+	"github.com/KevinCowleys/osmo-live/pkg/ble"
+	"github.com/KevinCowleys/osmo-live/pkg/osmo"
 )
 
 func main() {

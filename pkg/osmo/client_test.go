@@ -3,8 +3,8 @@ package osmo
 import (
 	"testing"
 
-	"osmo-live/pkg/ble"
-	"osmo-live/pkg/commands"
+	"github.com/KevinCowleys/osmo-live/pkg/ble"
+	"github.com/KevinCowleys/osmo-live/pkg/commands"
 )
 
 // Mocks

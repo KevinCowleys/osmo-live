@@ -1,7 +1,7 @@
 package commands
 
 import (
-	"osmo-live/pkg/protocol"
+	"github.com/KevinCowleys/osmo-live/pkg/protocol"
 )
 
 // ConstructStopStreamingPacket sends 0x8E command to stop

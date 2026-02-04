@@ -5,8 +5,8 @@ import (
 	"log"
 	"time"
 
-	"osmo-live/pkg/ble"
-	"osmo-live/pkg/commands"
+	"github.com/KevinCowleys/osmo-live/pkg/ble"
+	"github.com/KevinCowleys/osmo-live/pkg/commands"
 )
 
 // State tracks the connection phase

@@ -1,4 +1,4 @@
-module osmo-live
+module github.com/KevinCowleys/osmo-live
 
 go 1.25.6
 

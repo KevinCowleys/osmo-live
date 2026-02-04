@@ -1,8 +1,8 @@
 package commands
 
 import (
-	"osmo-live/pkg/ble"
-	"osmo-live/pkg/protocol"
+	"github.com/KevinCowleys/osmo-live/pkg/ble"
+	"github.com/KevinCowleys/osmo-live/pkg/protocol"
 )
 
 var seqID uint16 = 0x1000

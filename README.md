@@ -36,8 +36,8 @@ Want to build your own tool? Check out the [examples/](examples/) folder.
 package main
 
 import (
-    "log"
-    "osmo-live/pkg/osmo"
+    "github.com/KevinCowleys/osmo-live/pkg/ble"
+    "github.com/KevinCowleys/osmo-live/pkg/osmo"
 )
 
 func main() {
@@ -45,6 +45,8 @@ func main() {
         SSID:     "MyWiFi",
         Password: "MyPassword",
         RTMPURL:  "rtmp://...",
+        Res:      ble.Resolution1080p,
+        FPS:      ble.Framerate30,
     })
 
     if err := client.Start(); err != nil {
