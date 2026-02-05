@@ -252,7 +252,7 @@ func (c *Client) run(ready chan struct{}) {
 			c.handlePacket(data)
 		case <-ticker.C:
 			if err := c.handleTick(); err != nil {
-				c.Log.Printf("Tick error: %v", err)
+				c.Log.Printf("Tick error: %v\n", err)
 			}
 		}
 	}
