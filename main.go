@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -25,10 +26,45 @@ func main() {
 	steady := flag.Int("steady", 1, "Stabilization: 0=Off, 1=RS, 2=HS, 3=RS+, 4=HB")
 	connectOnly := flag.Bool("connect-only", false, "Connect only, do not start stream")
 
+	deviceAddr := flag.String("device", "", "Specific BLE Address to connect to")
+	doScan := flag.Bool("scan", false, "Scan for devices and exit")
+
 	flag.Parse()
 
 	if *ssid == "" || *password == "" || *rtmpURL == "" {
 		log.Fatal("All flags (-ssid, -password, -rtmp) are required")
+	}
+
+	if *doScan {
+		fmt.Println("Scanning for Osmo devices (5s)...")
+		devices, err := osmo.Scan(5 * time.Second)
+		if err != nil {
+			log.Fatalf("Scan error: %v", err)
+		}
+
+		if len(devices) == 0 {
+			fmt.Println("No devices found.")
+			os.Exit(0)
+		}
+
+		fmt.Println("Found Devices:")
+		for i, d := range devices {
+			fmt.Printf("[%d] %s (RSSI: %d) %s\n", i+1, d.Name, d.RSSI, d.Address)
+		}
+
+		fmt.Print("\nSelect device # to connect (or 0 to exit): ")
+		reader := bufio.NewReader(os.Stdin)
+		input, _ := reader.ReadString('\n')
+		input = input[:len(input)-1] // trim newline
+
+		idx, err := strconv.Atoi(input)
+		if err != nil || idx < 1 || idx > len(devices) {
+			fmt.Println("Invalid selection or exit.")
+			os.Exit(0)
+		}
+
+		*deviceAddr = devices[idx-1].Address
+		fmt.Printf("Selected: %s\n", devices[idx-1].Name)
 	}
 
 	var djiRes ble.DjiResolution
@@ -79,7 +115,7 @@ func main() {
 
 	fmt.Println("Starting DJI Streamer (Library Mode)...")
 
-	client.Connect()
+	client.Connect(*deviceAddr)
 	fmt.Println("Connecting...")
 
 	// Input Handler (for interactive start/stop)

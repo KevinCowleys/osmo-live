@@ -1,6 +1,7 @@
 package osmo
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -249,5 +250,92 @@ func TestDisconnect(t *testing.T) {
 	// Verify underlying connection was disconnected
 	if !mock.Disconnected {
 		t.Error("ble connection was not disconnected")
+	}
+}
+
+func TestScan(t *testing.T) {
+	originalScan := bleScan
+	defer func() { bleScan = originalScan }()
+
+	mockDevices := []ble.ScannedDevice{
+		{Name: "Osmo Action 4", Address: "11:22:33:44:55:66", Model: ble.DjiModelOsmoAction4, RSSI: -50},
+	}
+
+	bleScan = func(ctx context.Context) ([]ble.ScannedDevice, error) {
+		return mockDevices, nil
+	}
+
+	devices, err := Scan(1 * time.Second)
+	if err != nil {
+		t.Fatalf("Scan failed: %v", err)
+	}
+
+	if len(devices) != 1 {
+		t.Fatalf("Expected 1 device, got %d", len(devices))
+	}
+
+	d := devices[0]
+	if d.Name != "Osmo Action 4" || d.Address != "11:22:33:44:55:66" || d.RSSI != -50 {
+		t.Errorf("Device mismatch: %+v", d)
+	}
+}
+
+func TestConnectSelection(t *testing.T) {
+	mock := &MockConn{}
+	client := newTestClient(mock)
+
+	wantedAddress := "AA:BB:CC:DD:EE:FF"
+	connectedAddr := ""
+
+	client.Connector = func(address string) (Conn, error) {
+		connectedAddr = address
+		return mock, nil
+	}
+
+	client.Connect(wantedAddress)
+	time.Sleep(50 * time.Millisecond)
+
+	if connectedAddr != wantedAddress {
+		t.Errorf("Connect called with wrong address: want %s, got %s", wantedAddress, connectedAddr)
+	}
+
+	// Verify it proceeds to connect phase
+	if client.Conn != mock {
+		t.Error("Client Conn not set correctly")
+	}
+}
+
+func TestConnectCancellation(t *testing.T) {
+	mock := &MockConn{Disconnected: false}
+
+	client := &Client{
+		Log:       &defaultLogger{},
+		Connector: nil,
+		Updates:   make(chan Update, 10),
+		done:      make(chan struct{}),
+	}
+
+	// Simulate a slow connection process
+	connBlocked := make(chan struct{})
+	client.Connector = func(address string) (Conn, error) {
+		<-connBlocked // Wait until we signal to proceed
+		return mock, nil
+	}
+
+	client.Connect("")
+
+	// Immediately disconnect
+	client.Disconnect()
+
+	// Allow connection to complete
+	close(connBlocked)
+	time.Sleep(50 * time.Millisecond)
+
+	if !mock.Disconnected {
+		t.Error("Connection should have been disconnected immediately due to race condition check")
+	}
+
+	if client.Conn != nil {
+		t.Error("Client Conn should not have been set")
 	}
 }

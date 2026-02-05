@@ -1,6 +1,7 @@
 package osmo
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"time"
@@ -8,6 +9,8 @@ import (
 	"github.com/KevinCowleys/osmo-live/pkg/ble"
 	"github.com/KevinCowleys/osmo-live/pkg/commands"
 )
+
+var bleScan = ble.Scan
 
 // Connection phase
 type State int
@@ -36,6 +39,36 @@ type Config struct {
 	Steady   int
 }
 
+type DiscoveredDevice struct {
+	Name    string
+	Address string
+	Model   string
+	RSSI    int16
+}
+
+// Scan for DJI devices.
+// Context timeout controls how long we listen.
+func Scan(duration time.Duration) ([]DiscoveredDevice, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), duration)
+	defer cancel()
+
+	results, err := bleScan(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	var devices []DiscoveredDevice
+	for _, r := range results {
+		devices = append(devices, DiscoveredDevice{
+			Name:    r.Name,
+			Address: r.Address,
+			Model:   r.Model.String(),
+			RSSI:    r.RSSI,
+		})
+	}
+	return devices, nil
+}
+
 type Conn interface {
 	Send(data []byte) error
 	Subscribe(func([]byte)) error
@@ -44,6 +77,8 @@ type Conn interface {
 	IsModel(ble.DjiDeviceModel) bool
 	Disconnect() error
 }
+
+type Connector func(address string) (Conn, error)
 
 // Logger allows redirecting library output (e.g. for TUI/GUI)
 type Logger interface {
@@ -78,6 +113,8 @@ type Client struct {
 	State  State
 	Log    Logger // Optional logger
 
+	Connector Connector // Function to establish connection
+
 	// Public Updates channel
 	Updates chan Update
 
@@ -108,11 +145,20 @@ func NewClient(cfg Config) *Client {
 		Config:    cfg,
 		State:     StateConnecting,
 		Log:       &defaultLogger{},
+		Connector: defaultConnector,
 		Updates:   make(chan Update, 50),
 		events:    make(chan []byte, 50),
 		done:      make(chan struct{}),
 		battLevel: -1,
 	}
+}
+
+func defaultConnector(address string) (Conn, error) {
+	c, err := ble.Connect(address)
+	if err != nil {
+		return nil, err
+	}
+	return &BleWrapper{c}, nil
 }
 
 // pushUpdate sends an update in a non-blocking way to ensure the event loop never freezes
@@ -124,28 +170,35 @@ func (c *Client) pushUpdate(u Update) {
 	}
 }
 
-// Connect in background. Listen to Updates/events channel.
-func (c *Client) Connect() {
+// Connect starts the connection process to a specific device.
+// If address is empty, it will fallback to "first found" (backward compatibility).
+func (c *Client) Connect(address string) {
 	go func() {
-		conn, err := ble.Connect()
+		// Empty address = auto scan/first found
+		conn, err := c.Connector(address)
 		if err != nil {
 			c.pushUpdate(Update{Type: UpdateError, Payload: fmt.Errorf("ble connect: %w", err)})
 			return
 		}
 
-		c.Conn = &BleWrapper{conn}
-		c.Log.Printf("Connected to %s", conn.Name)
+		// Race fix: user might have mashed Ctrl+C while we were connecting
+		select {
+		case <-c.done:
+			c.Log.Println("Connect aborted.")
+			conn.Disconnect()
+			return
+		default:
+		}
 
-		// Channel to synchronize subscription
+		c.Conn = conn
+		c.Log.Printf("Connected to %s\n", conn.Name())
+
+		// Sync channel to make sure we're subscribed before sending packets
 		ready := make(chan struct{})
-
-		// Kick off the event loop
 		go c.run(ready)
+		<-ready
 
-		// Wait for subscription to complete so we don't miss the reply
-		<-ready // Block until ready
-
-		// Start the pairing handshake
+		// Start the handshake sequence
 		c.Log.Println("Starting pairing...")
 		pkt, _ := commands.ConstructPairingPacket()
 		b, _ := pkt.Encode()
@@ -174,7 +227,7 @@ func (c *Client) run(ready chan struct{}) {
 	if err := c.subscribe(); err != nil {
 		log.Printf("sub error: %v", err)
 		if ready != nil {
-			close(ready) // unblock caller even on error (though connection might be broken)
+			close(ready) // unblock caller even if we failed
 		}
 		return
 	}
@@ -196,7 +249,6 @@ func (c *Client) run(ready chan struct{}) {
 		case <-time.After(500 * time.Millisecond):
 			if err := c.handleTick(); err != nil {
 				c.Log.Printf("Tick error: %v", err)
-				// Consider triggering a disconnect or error update here
 			}
 		}
 	}

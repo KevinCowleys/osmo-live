@@ -15,12 +15,26 @@ Personally tested with:
 
 You'll need `sudo` for Bluetooth access.
 
+This will connect to the first device that gets found and start streaming.
+
 ```bash
 # Build
-go build -o dji_streamer main.go
+go build -o osmo-live main.go
 
 # Run
-sudo ./dji_streamer \
+sudo ./osmo-live \
+  -ssid "MyWiFi" \
+  -password "MyPassword" \
+  -rtmp "rtmp://..."
+```
+
+**Interactive Connect (Scan & Select):**
+
+This will scan for devices and allow you to select one to connect to.
+
+```bash
+sudo ./osmo-live \
+  -scan \
   -ssid "MyWiFi" \
   -password "MyPassword" \
   -rtmp "rtmp://..."
@@ -32,28 +46,6 @@ Want to build your own tool? Check out the [examples/](examples/) folder.
 
 **Simple Example:** [`examples/simple_stream/main.go`](examples/simple_stream/main.go)
 
-```go
-package main
-
-import (
-    "github.com/KevinCowleys/osmo-live/pkg/ble"
-    "github.com/KevinCowleys/osmo-live/pkg/osmo"
-)
-
-func main() {
-    client := osmo.NewClient(osmo.Config{
-        SSID:     "MyWiFi",
-        Password: "MyPassword",
-        RTMPURL:  "rtmp://...",
-        Res:      ble.Resolution1080p,
-        FPS:      ble.Framerate30,
-    })
-
-    if err := client.Start(); err != nil {
-        log.Fatal(err)
-    }
-}
-```
 
 ## Flags
 
@@ -67,6 +59,8 @@ func main() {
 | `-bitrate` | 6000 | Kbps |
 | `-steady` | 1 | 0=Off, 1=RS, 2=HS (Action 4/5 only) |
 | `-connect-only` | false | Connect and idle. Press Enter to start stream. |
+| `-scan` | false | List devices. Use with other flags to select & connect interactively. |
+| `-device` | | Connect to specific BLE Address (e.g. `AA:BB:CC...`). |
 
 ## Credits
 
