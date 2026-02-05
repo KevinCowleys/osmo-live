@@ -136,8 +136,9 @@ type BleWrapper struct {
 
 const (
 	maxRetries = 3
-	// Action 4 is reportedly slow to switch modes, keep this generous
-	txTimeout = 2 * time.Second
+	// Action 4 is reportedly slow to switch modes, keep this generous.
+	// We increased this to 5s because 2s was triggering false positives during startup.
+	txTimeout = 5 * time.Second
 )
 
 func NewClient(cfg Config) *Client {
@@ -240,13 +241,16 @@ func (c *Client) run(ready chan struct{}) {
 	c.readInitial()
 	c.lastHeartbeat = time.Now()
 
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+
 	for {
 		select {
 		case <-c.done:
 			return
 		case data := <-c.events:
 			c.handlePacket(data)
-		case <-time.After(500 * time.Millisecond):
+		case <-ticker.C:
 			if err := c.handleTick(); err != nil {
 				c.Log.Printf("Tick error: %v", err)
 			}
@@ -269,21 +273,26 @@ func (c *Client) readInitial() {
 }
 
 func (c *Client) handlePacket(data []byte) {
-	c.checkHeartbeat(data)
+	c.lastHeartbeat = time.Now()
+	c.checkBattery(data)
 	c.stateMachine(data)
 }
 
-func (c *Client) checkHeartbeat(data []byte) {
-	if len(data) <= 10 || data[9] != 0x02 || data[10] != 0x0D {
+func (c *Client) checkBattery(data []byte) {
+	// DJI "Push Info" packet (CmdSet 0x0D, CmdID 0x02)
+	// This packet contains device status including battery.
+	if len(data) < 13 || data[9] != 0x0D || data[10] != 0x02 {
 		return
 	}
 
-	c.lastHeartbeat = time.Now()
-	if len(data) < 32 {
+	// Battery level is located at payload index 20.
+	// Header is 11 bytes, so absolute index is 31.
+	const batteryIdx = 31
+	if len(data) <= batteryIdx {
 		return
 	}
 
-	lvl := int(data[31])
+	lvl := int(data[batteryIdx])
 	if lvl != c.battLevel {
 		c.battLevel = lvl
 		c.pushUpdate(Update{Type: UpdateBattery, Payload: lvl})
@@ -347,7 +356,7 @@ func (c *Client) stateMachine(data []byte) {
 			return
 		}
 		c.reset()
-		c.Log.Println("> WiFi OK.")
+		c.Log.Println("> WiFi Connected.")
 
 		// Branch based on Model
 		if c.Conn.IsModel(ble.DjiModelOsmoAction3) || c.Conn.IsModel(ble.DjiModelOsmoPocket3) {
@@ -404,7 +413,7 @@ func (c *Client) checkRetry() error {
 	}
 
 	c.attempts++
-	c.Log.Printf("\n! Timeout. Retry %d/%d... ", c.attempts, maxRetries)
+	c.Log.Printf("> No response yet... Retry %d/%d... \n", c.attempts, maxRetries)
 	c.Conn.Send(c.lastPacket)
 	c.lastTxTime = time.Now()
 
@@ -416,16 +425,17 @@ func (c *Client) monitorStream() {
 		return
 	}
 
-	if time.Since(c.lastHeartbeat) >= 5*time.Second {
-		c.Log.Println("\n! No Heartbeat (5s)")
-		return
+	hbAge := time.Since(c.lastHeartbeat)
+	warn := ""
+	if hbAge >= 5*time.Second {
+		warn = " (NO PACKETS)"
 	}
 
 	bs := "??"
 	if c.battLevel >= 0 {
 		bs = fmt.Sprintf("%d%%", c.battLevel)
 	}
-	c.Log.Printf("\r> Streaming | Batt: %s | Last HB: %s   ", bs, time.Since(c.lastHeartbeat).Round(time.Second))
+	c.Log.Printf("\r> Streaming | Batt: %s | Last Rx: %s%s   ", bs, hbAge.Round(time.Second), warn)
 }
 
 // Configure updates the flight parameters (only when Idle)
@@ -491,6 +501,9 @@ func (c *Client) Disconnect() error {
 // Helpers
 
 func (c *Client) sendValid(data []byte) {
+	if c.Conn == nil {
+		return
+	}
 	c.lastPacket = data
 	c.lastTxTime = time.Now()
 	c.attempts = 0

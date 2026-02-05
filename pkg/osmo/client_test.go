@@ -44,35 +44,85 @@ func newTestClient(mock *MockConn) *Client {
 
 // Tests
 
-func TestCheckHeartbeat(t *testing.T) {
+func TestPacketKeepAlive(t *testing.T) {
 	c := &Client{
 		battLevel: -1,
-		Updates:   make(chan Update, 10), // Buffered to avoid blocking
+		Updates:   make(chan Update, 10),
+		Log:       &defaultLogger{},
 	}
 
-	// Too short
-	c.checkHeartbeat([]byte{0x00})
-	if c.battLevel != -1 {
-		t.Fail()
+	// Set last heartbeat to past
+	c.lastHeartbeat = time.Now().Add(-1 * time.Minute)
+	oldTime := c.lastHeartbeat
+
+	// Handle random packet
+	c.handlePacket([]byte{0x01, 0x02, 0x03})
+
+	// Should have updated time
+	if !c.lastHeartbeat.After(oldTime) {
+		t.Error("expected lastHeartbeat to update on packet receipt")
 	}
 
-	// Valid (85%)
-	pkt := make([]byte, 35)
-	pkt[9], pkt[10] = 0x02, 0x0D // CmdSet/CmdID
-	pkt[31] = 85                 // Battery
-	c.checkHeartbeat(pkt)
+	// Should be recent (within 1s)
+	if time.Since(c.lastHeartbeat) > time.Second {
+		t.Error("lastHeartbeat is not recent")
+	}
+}
 
-	if c.battLevel != 85 {
-		t.Errorf("want 85, got %d", c.battLevel)
+func TestBatteryParsing(t *testing.T) {
+	c := &Client{
+		battLevel: -1,
+		Updates:   make(chan Update, 10),
+		Log:       &defaultLogger{},
 	}
 
-	// Wrong CmdID
+	// 1. Valid Packet
+	// CmdSet 0x0D, CmdID 0x02, Offset 31 = Battery
+	pkt := make([]byte, 40)
+	pkt[9] = 0x0D  // CmdSet
+	pkt[10] = 0x02 // CmdID
+	pkt[31] = 95   // Battery Level = 95%
+
+	c.checkBattery(pkt)
+
+	if c.BatteryLevel() != 95 {
+		t.Errorf("valid: expected 95, got %d", c.BatteryLevel())
+	}
+
+	// Verify update
+	select {
+	case u := <-c.Updates:
+		if u.Payload.(int) != 95 {
+			t.Errorf("valid: wrong update payload: %v", u.Payload)
+		}
+	default:
+		t.Error("valid: missing update")
+	}
+
+	// 2. Negative Test: Wrong CmdID
 	pkt[10] = 0x99
-	pkt[31] = 90
-	c.checkHeartbeat(pkt)
+	pkt[31] = 100 // Try to change battery to 100
+	c.checkBattery(pkt)
 
-	if c.battLevel != 85 {
-		t.Error("should ignore non-heartbeat packet")
+	if c.BatteryLevel() != 95 {
+		t.Errorf("negative(cmd): should stay 95, got %d", c.BatteryLevel())
+	}
+
+	// Ensure no update sent
+	select {
+	case <-c.Updates:
+		t.Error("negative(cmd): should not send update")
+	default:
+	}
+
+	// 3. Negative Test: Too Short
+	shortPkt := make([]byte, 30) // Need > 31
+	shortPkt[9] = 0x0D
+	shortPkt[10] = 0x02
+	c.checkBattery(shortPkt)
+
+	if c.BatteryLevel() != 95 {
+		t.Errorf("negative(len): should stay 95, got %d", c.BatteryLevel())
 	}
 }
 
@@ -136,32 +186,6 @@ func TestPacketConstruction(t *testing.T) {
 	p2, _ := commands.ConstructWiFiConnectPacket("foo", "bar")
 	if p2.Payload[0] != 3 { // len("foo")
 		t.Errorf("WiFi: want SSID len 3, got %d", p2.Payload[0])
-	}
-}
-
-func TestBatteryUpdates(t *testing.T) {
-	mock := &MockConn{}
-	client := newTestClient(mock)
-
-	// Create a fake heartbeat packet with 85% battery
-	pkt := make([]byte, 35)
-	pkt[9], pkt[10] = 0x02, 0x0D
-	pkt[31] = 85
-
-	client.handlePacket(pkt)
-
-	if client.BatteryLevel() != 85 {
-		t.Errorf("battery level: want 85, got %d", client.BatteryLevel())
-	}
-
-	// Verify the update was pushed
-	select {
-	case u := <-client.Updates:
-		if u.Type != UpdateBattery || u.Payload.(int) != 85 {
-			t.Errorf("update: want Battery(85), got %v", u)
-		}
-	default:
-		t.Error("update: expected update, got none")
 	}
 }
 
