@@ -39,9 +39,28 @@ func main() {
 	// 2. Initialize Client
 	client := osmo.NewClient(cfg)
 
-	// 3. Start (Connect -> Handshake -> WiFi -> Stream)
-	log.Println("Starting Osmo Streamer...")
-	if err := client.Start(); err != nil {
-		log.Fatalf("Error: %v", err)
+	// 3. Start the connection process
+	log.Println("Connecting to Osmo...")
+	client.Connect()
+
+	// 4. Listen for updates and react
+	for update := range client.Updates {
+		switch update.Type {
+		case osmo.UpdateError:
+			log.Fatalf("Error: %v", update.Payload)
+
+		case osmo.UpdateStateChange:
+			state := update.Payload.(osmo.State)
+			log.Printf("Current State: %v", state)
+
+			if state != osmo.StateIdle {
+				continue
+			}
+
+			log.Println("Ready. Sending start stream command...")
+			if err := client.StartStream(); err != nil {
+				log.Fatalf("Failed to start: %v", err)
+			}
+		}
 	}
 }

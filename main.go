@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"flag"
 	"fmt"
 	"log"
@@ -18,10 +19,11 @@ func main() {
 	password := flag.String("password", "", "WiFi Password")
 	rtmpURL := flag.String("rtmp", "", "RTMP Server URL")
 
-	res := flag.Int("res", 1080, "Resolution (720, 1080)")
+	res := flag.Int("res", 1080, "Resolution (480, 720, 1080)")
 	fps := flag.Int("fps", 30, "Framerate (25, 30)")
 	bitrate := flag.Int("bitrate", 6000, "Bitrate in Kbps")
 	steady := flag.Int("steady", 1, "Stabilization: 0=Off, 1=RS, 2=HS, 3=RS+, 4=HB")
+	connectOnly := flag.Bool("connect-only", false, "Connect only, do not start stream")
 
 	flag.Parse()
 
@@ -69,19 +71,73 @@ func main() {
 	go func() {
 		<-c
 		fmt.Println("\n\n>> Interrupt received.")
-		if client.Conn != nil {
-			if err := client.Stop(); err != nil {
-				fmt.Printf("Error sending stop command: %v\n", err)
-			} else {
-				fmt.Println(">> Stop command sent.")
-			}
-			time.Sleep(500 * time.Millisecond)
-		}
+		client.StopStream()
+		client.Disconnect()
+		time.Sleep(500 * time.Millisecond)
 		os.Exit(0)
 	}()
 
 	fmt.Println("Starting DJI Streamer (Library Mode)...")
-	if err := client.Start(); err != nil {
-		log.Fatalf("Streamer Error: %v", err)
+
+	client.Connect()
+	fmt.Println("Connecting...")
+
+	// Input Handler (for interactive start/stop)
+	go func() {
+		scanner := bufio.NewScanner(os.Stdin)
+		for scanner.Scan() {
+			text := scanner.Text()
+			switch text {
+			case "", "start":
+				// Only allow manual start if we are in Connect-Only mode or just idle
+				if client.State != osmo.StateIdle {
+					fmt.Println(">> Waiting for Idle state...")
+					continue
+				}
+
+				fmt.Println(">> Manual Start Requested...")
+				if err := client.StartStream(); err != nil {
+					log.Printf("Failed to start stream: %v", err)
+				}
+
+			case "stop":
+				fmt.Println(">> Stopping and Exiting...")
+				client.StopStream()
+				client.Disconnect()
+				time.Sleep(500 * time.Millisecond) // Give time for cleanup packets
+				os.Exit(0)
+			}
+		}
+	}()
+
+	// State Machine Loop
+	isIdle := false
+	for update := range client.Updates {
+		switch update.Type {
+		case osmo.UpdateStateChange:
+			state := update.Payload.(osmo.State)
+			fmt.Printf("State: %v\n", state)
+
+			// Once we're paired and idle, we can start the stream
+			if state != osmo.StateIdle || isIdle {
+				continue
+			}
+
+			isIdle = true
+
+			if *connectOnly {
+				fmt.Println("Device ready. Idle mode (Connect Only).")
+				fmt.Println(">> Press [ENTER] to start stream, or type 'stop' to stop.")
+				continue
+			}
+
+			fmt.Println("Device ready. Starting stream...")
+			if err := client.StartStream(); err != nil {
+				log.Printf("Failed to start stream: %v", err)
+			}
+
+		case osmo.UpdateError:
+			fmt.Printf("Error: %v\n", update.Payload)
+		}
 	}
 }

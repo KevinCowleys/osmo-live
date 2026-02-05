@@ -1,4 +1,4 @@
-# DJI Osmo RTMP Streamer (Go)
+# DJI Osmo RTMP Streamer
 
 A simple Go tool to stream from your DJI Osmo straight to RTMP. No app required.
 
@@ -23,7 +23,7 @@ go build -o dji_streamer main.go
 sudo ./dji_streamer \
   -ssid "MyWiFi" \
   -password "MyPassword" \
-  -rtmp "rtmp://live.twitch.tv/app/..."
+  -rtmp "rtmp://..."
 ```
 
 ### As a Library
@@ -62,11 +62,12 @@ func main() {
 | `-ssid` | | **Required** |
 | `-password` | | **Required** |
 | `-rtmp` | | **Required** |
-| `-res` | 1080 | 720, 1080 |
+| `-res` | 1080 | 480, 720, 1080 |
 | `-fps` | 30 | 25, 30 |
 | `-bitrate` | 6000 | Kbps |
 | `-steady` | 1 | 0=Off, 1=RS, 2=HS (Action 4/5 only) |
+| `-connect-only` | false | Connect and idle. Press Enter to start stream. |
 
 ## Credits
 
-Big thanks to the **[node-osmo](https://github.com/Start-Streaming/node-osmo)** project for reverse engineering the protocol. This is basically a Go port of their hard work.
+Big thanks to the **[node-osmo](https://github.com/datagutt/node-osmo)** project for reverse engineering the protocol. This is basically a Go port of their hard work.

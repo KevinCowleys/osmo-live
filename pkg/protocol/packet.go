@@ -6,7 +6,7 @@ import (
 	"fmt"
 )
 
-// Packet represents a DJI DUML packet
+// DJI DUML packet
 type Packet struct {
 	Magic   uint8 // 0x55
 	Length  uint8
@@ -33,6 +33,7 @@ var (
 )
 
 func init() {
+	// Generating these at runtime saves space/mess
 	// CRC8 (Poly: 0x31, Init: 0xEE, Reflected)
 	poly8 := uint8(0x8C)
 	for i := 0; i < 256; i++ {

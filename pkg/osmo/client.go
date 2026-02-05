@@ -9,12 +9,14 @@ import (
 	"github.com/KevinCowleys/osmo-live/pkg/commands"
 )
 
-// State tracks the connection phase
+// Connection phase
 type State int
 
 const (
 	StateConnecting State = iota
 	StatePairing
+	StateIdle
+	StateResetting
 	StateStopping
 	StatePreparing
 	StateWiFi
@@ -23,7 +25,7 @@ const (
 	StateStreaming
 )
 
-// Config holds all parameters for the stream
+// Stream parameters
 type Config struct {
 	SSID     string
 	Password string
@@ -40,6 +42,7 @@ type Conn interface {
 	Read() ([]byte, error)
 	Name() string
 	IsModel(ble.DjiDeviceModel) bool
+	Disconnect() error
 }
 
 // Logger allows redirecting library output (e.g. for TUI/GUI)
@@ -54,15 +57,33 @@ type defaultLogger struct{}
 func (l *defaultLogger) Printf(format string, v ...interface{}) { fmt.Printf(format, v...) }
 func (l *defaultLogger) Println(v ...interface{})               { fmt.Println(v...) }
 
-// Client represents a controller for a DJI Osmo device
+type UpdateType int
+
+const (
+	UpdateBattery UpdateType = iota
+	UpdateStateChange
+	UpdateError
+)
+
+// Event from the client
+type Update struct {
+	Type    UpdateType
+	Payload interface{} // int for battery, State for state change, error for error
+}
+
+// DJI Osmo device
 type Client struct {
 	Config Config
 	Conn   Conn // Use interface
 	State  State
 	Log    Logger // Optional logger
 
+	// Public Updates channel
+	Updates chan Update
+
 	// Internal
 	events        chan []byte
+	done          chan struct{}
 	lastHeartbeat time.Time
 	battLevel     int
 
@@ -72,36 +93,68 @@ type Client struct {
 	attempts   int
 }
 
-// BleWrapper adapts ble.Connection to osmo.Conn
 type BleWrapper struct {
 	*ble.Connection
 }
 
 const (
 	maxRetries = 3
-	txTimeout  = 2 * time.Second
+	// Action 4 is reportedly slow to switch modes, keep this generous
+	txTimeout = 2 * time.Second
 )
 
-// NewClient creates a new Osmo controller
 func NewClient(cfg Config) *Client {
 	return &Client{
 		Config:    cfg,
 		State:     StateConnecting,
 		Log:       &defaultLogger{},
-		events:    make(chan []byte, 10),
+		Updates:   make(chan Update, 50),
+		events:    make(chan []byte, 50),
+		done:      make(chan struct{}),
 		battLevel: -1,
 	}
 }
 
-// Connect Scans and connects to the device
-func (c *Client) Connect() error {
-	conn, err := ble.Connect()
-	if err != nil {
-		return err
+// pushUpdate sends an update in a non-blocking way to ensure the event loop never freezes
+func (c *Client) pushUpdate(u Update) {
+	select {
+	case c.Updates <- u:
+	default:
+		c.Log.Printf("Warning: Updates channel full. Dropping update type %v", u.Type)
 	}
-	c.Conn = &BleWrapper{conn}
-	c.Log.Printf("Connected to %s\n", conn.Name)
-	return nil
+}
+
+// Connect in background. Listen to Updates/events channel.
+func (c *Client) Connect() {
+	go func() {
+		conn, err := ble.Connect()
+		if err != nil {
+			c.pushUpdate(Update{Type: UpdateError, Payload: fmt.Errorf("ble connect: %w", err)})
+			return
+		}
+
+		c.Conn = &BleWrapper{conn}
+		c.Log.Printf("Connected to %s", conn.Name)
+
+		// Channel to synchronize subscription
+		ready := make(chan struct{})
+
+		// Kick off the event loop
+		go c.run(ready)
+
+		// Wait for subscription to complete so we don't miss the reply
+		<-ready // Block until ready
+
+		// Start the pairing handshake
+		c.Log.Println("Starting pairing...")
+		pkt, _ := commands.ConstructPairingPacket()
+		b, _ := pkt.Encode()
+
+		c.sendValid(b)
+
+		c.State = StatePairing
+		c.pushUpdate(Update{Type: UpdateStateChange, Payload: StatePairing})
+	}()
 }
 
 func (w *BleWrapper) Name() string {
@@ -112,16 +165,23 @@ func (w *BleWrapper) IsModel(m ble.DjiDeviceModel) bool {
 	return w.Connection.Model == m
 }
 
-// Start begins the main event loop
-func (c *Client) Start() error {
-	if c.Conn == nil {
-		if err := c.Connect(); err != nil {
-			return err
-		}
-	}
+func (w *BleWrapper) Disconnect() error {
+	return w.Connection.Disconnect()
+}
 
+// Background loop
+func (c *Client) run(ready chan struct{}) {
 	if err := c.subscribe(); err != nil {
 		log.Printf("sub error: %v", err)
+		if ready != nil {
+			close(ready) // unblock caller even on error (though connection might be broken)
+		}
+		return
+	}
+
+	// Signal we are listening
+	if ready != nil {
+		close(ready)
 	}
 
 	c.readInitial()
@@ -129,11 +189,14 @@ func (c *Client) Start() error {
 
 	for {
 		select {
+		case <-c.done:
+			return
 		case data := <-c.events:
 			c.handlePacket(data)
 		case <-time.After(500 * time.Millisecond):
 			if err := c.handleTick(); err != nil {
-				return err
+				c.Log.Printf("Tick error: %v", err)
+				// Consider triggering a disconnect or error update here
 			}
 		}
 	}
@@ -171,6 +234,7 @@ func (c *Client) checkHeartbeat(data []byte) {
 	lvl := int(data[31])
 	if lvl != c.battLevel {
 		c.battLevel = lvl
+		c.pushUpdate(Update{Type: UpdateBattery, Payload: lvl})
 	}
 }
 
@@ -188,22 +252,31 @@ func (c *Client) stateMachine(data []byte) {
 			return
 		}
 		c.reset()
-		c.Log.Println("> Paired. Stopping...")
-		pkt, _ := commands.ConstructStopStreamingPacket()
-		b, _ := pkt.Encode()
-		c.sendValid(b)
-		c.State = StateStopping
+		c.Log.Println("Paired. Device is idle.")
+		c.State = StateIdle
+		c.pushUpdate(Update{Type: UpdateStateChange, Payload: StateIdle})
 
-	case StateStopping:
+	case StateResetting:
 		if !c.isSeq(data, 0xc8, 0xea) {
 			return
 		}
 		c.reset()
-		c.Log.Println("> Stopped. Preparing...")
+		c.Log.Println("> Reset. Preparing...")
 		pkt, _ := commands.ConstructPreparingPacket()
 		b, _ := pkt.Encode()
 		c.sendValid(b)
 		c.State = StatePreparing
+		c.pushUpdate(Update{Type: UpdateStateChange, Payload: StatePreparing})
+
+	case StateStopping:
+		// Expect same ack as StateResetting since command is identical
+		if !c.isSeq(data, 0xc8, 0xea) {
+			return
+		}
+		c.reset()
+		c.Log.Println("> Stopped. Idle.")
+		c.State = StateIdle
+		c.pushUpdate(Update{Type: UpdateStateChange, Payload: StateIdle})
 
 	case StatePreparing:
 		if !c.isSeq(data, 0x12, 0x8c) {
@@ -215,6 +288,7 @@ func (c *Client) stateMachine(data []byte) {
 		b, _ := pkt.Encode()
 		c.sendValid(b)
 		c.State = StateWiFi
+		c.pushUpdate(Update{Type: UpdateStateChange, Payload: StateWiFi})
 
 	case StateWiFi:
 		if !c.isSeq(data, 0x19, 0x8c) {
@@ -235,6 +309,7 @@ func (c *Client) stateMachine(data []byte) {
 		b, _ := pkt.Encode()
 		c.sendValid(b)
 		c.State = StateConfiguring
+		c.pushUpdate(Update{Type: UpdateStateChange, Payload: StateConfiguring})
 
 	case StateConfiguring:
 		if !c.isSeq(data, 0x2d, 0x8c) {
@@ -251,6 +326,7 @@ func (c *Client) stateMachine(data []byte) {
 		c.reset()
 		c.Log.Println("> Stream Requested. Monitoring.")
 		c.State = StateStreaming
+		c.pushUpdate(Update{Type: UpdateStateChange, Payload: StateStreaming})
 	}
 }
 
@@ -300,12 +376,64 @@ func (c *Client) monitorStream() {
 	c.Log.Printf("\r> Streaming | Batt: %s | Last HB: %s   ", bs, time.Since(c.lastHeartbeat).Round(time.Second))
 }
 
-// Stop sends a stop streaming command
-func (c *Client) Stop() error {
+// Configure updates the flight parameters (only when Idle)
+func (c *Client) Configure(cfg Config) error {
+	if c.State != StateIdle {
+		return fmt.Errorf("cannot configure while not idle (current: %v)", c.State)
+	}
+	c.Config = cfg
+	return nil
+}
+
+// StartStream begins the streaming sequence
+func (c *Client) StartStream() error {
+	if c.State != StateIdle {
+		return fmt.Errorf("cannot start stream while not idle (current: %v)", c.State)
+	}
+
+	c.Log.Println("Starting stream sequence...")
+
+	// Always cleanup/stop first to be safe
+	pkt, _ := commands.ConstructStopStreamingPacket()
+	b, _ := pkt.Encode()
+	c.sendValid(b)
+	c.State = StateResetting
+	c.pushUpdate(Update{Type: UpdateStateChange, Payload: StateResetting})
+	return nil
+}
+
+// StopStream sends stop command and returns to Idle
+func (c *Client) StopStream() error {
 	c.Log.Println("\n> Stopping stream...")
 	pkt, _ := commands.ConstructStopStreamingPacket()
 	b, _ := pkt.Encode()
-	return c.Conn.Send(b)
+	c.sendValid(b)
+	c.State = StateStopping
+	c.pushUpdate(Update{Type: UpdateStateChange, Payload: StateStopping})
+	return nil
+}
+
+// BatteryLevel returns the current battery percentage (0-100) or -1 if unknown
+func (c *Client) BatteryLevel() int {
+	return c.battLevel
+}
+
+// Disconnect closes the connection and cleans up
+func (c *Client) Disconnect() error {
+	c.Log.Println("> Disconnecting...")
+
+	// Signal background loop to stop
+	select {
+	case <-c.done:
+		// already closed
+	default:
+		close(c.done)
+	}
+
+	if c.Conn != nil {
+		return c.Conn.Disconnect()
+	}
+	return nil
 }
 
 // Helpers
@@ -326,6 +454,7 @@ func (c *Client) startRTMP() {
 	b, _ := pkt.Encode()
 	c.sendValid(b)
 	c.State = StateStartingRTMP
+	c.pushUpdate(Update{Type: UpdateStateChange, Payload: StateStartingRTMP})
 }
 
 func (c *Client) isSeq(data []byte, b0, b1 byte) bool {

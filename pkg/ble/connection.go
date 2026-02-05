@@ -149,3 +149,7 @@ func (c *Connection) Read() ([]byte, error) {
 	}
 	return buf[:n], nil
 }
+
+func (c *Connection) Disconnect() error {
+	return c.Device.Disconnect()
+}
